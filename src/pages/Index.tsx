@@ -3,25 +3,80 @@ import { useNavigate } from 'react-router-dom';
 import { FileUpload } from '@/components/FileUpload';
 import { generateMockAnalysis } from '@/lib/mock-analysis';
 import { Scale, Shield, Zap } from 'lucide-react';
+import { supabase } from '@/integrations/supabase/client';
+import { sendToN8n } from '@/lib/webhook';
+import { useToast } from '@/hooks/use-toast';
 
 const Index = () => {
   const [isLoading, setIsLoading] = useState(false);
   const navigate = useNavigate();
+  const { toast } = useToast();
 
   const handleAnalyze = async (name: string, text: string) => {
     setIsLoading(true);
-    // Simulate AI analysis delay
-    await new Promise((r) => setTimeout(r, 2000));
-    const result = generateMockAnalysis(name, text);
-    // Store in sessionStorage for results page
-    sessionStorage.setItem('analysisResult', JSON.stringify(result));
-    // Also store in history (localStorage for now)
-    const history = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
-    history.unshift(result);
-    localStorage.setItem('analysisHistory', JSON.stringify(history.slice(0, 50)));
-    setIsLoading(false);
-    navigate('/results');
+    try {
+      // 1. Save to Supabase
+      const { data: docData, error: docError } = await supabase
+        .from('documents')
+        .insert([{ file_name: name, original_text: text }])
+        .select()
+        .single();
+
+      if (docError) throw docError;
+
+      // 2. Send to n8n Webhook for processing
+      // Note: We're calling it, but for the UI we'll still use the mock generator
+      // unless n8n returns the full AnalysisResult format.
+      try {
+        await sendToN8n(text, name);
+      } catch (webhookError) {
+        console.warn('Webhook failed, but proceeding with local analysis:', webhookError);
+      }
+
+      // 3. Generate Analysis (mocked for now, but linked to Supabase ID)
+      const result = generateMockAnalysis(name, text);
+      result.id = docData.id; // Link to the database ID
+
+      // 4. Save analysis results to Supabase
+      const { error: analysisError } = await supabase
+        .from('analysis_results')
+        .insert([{
+          document_id: docData.id,
+          summary: result.summary,
+          risk_score: result.riskScore,
+          language: 'English', // Default
+          risk_flags: result.riskLevel as any,
+          clauses: result.clauses as any,
+          key_terms: result.keyTerms as any,
+          bns_sections: result.bnsIpcSections as any
+        }]);
+
+      if (analysisError) throw analysisError;
+
+      // Store in sessionStorage and history as before
+      sessionStorage.setItem('analysisResult', JSON.stringify(result));
+      const history = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
+      history.unshift(result);
+      localStorage.setItem('analysisHistory', JSON.stringify(history.slice(0, 50)));
+
+      toast({
+        title: "Analysis Complete",
+        description: "Document successfully saved to Supabase and analyzed.",
+      });
+
+      navigate('/results');
+    } catch (error: any) {
+      console.error('Analysis failed:', error);
+      toast({
+        title: "Error",
+        description: error.message || "Failed to process document. Check console for details.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
+
 
   return (
     <div className="min-h-[calc(100vh-4rem)] flex flex-col">
